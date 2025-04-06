@@ -1,17 +1,24 @@
-# Deploy Forgejo LXC - Proxmox Script
+# 🚀 Déploiement automatique de Forgejo dans un conteneur LXC (Ubuntu 22.04)
 
-Ce script automatise le **déploiement de Forgejo** dans un **conteneur LXC sous Proxmox VE**, à la manière des scripts `tteck.eth`.
+Ce script permet de créer automatiquement un conteneur LXC dans Proxmox, d’y installer Docker + Docker Compose, et de déployer Forgejo via Docker.
 
-## 🚀 Fonctionnalités
+> Inspiré du style Tteck.eth : interactif, propre.
 
-- Crée un CT Ubuntu 22.04 avec les ressources définies par l'utilisateur
-- Installe Docker, Docker Compose, et les dépendances nécessaires
-- Déploie **Forgejo (fork communautaire de Gitea)** via Docker
-- Expose Forgejo sur le port `3000` en HTTP (à sécuriser via reverse proxy si besoin)
+---
 
-## 📦 Déploiement rapide
+## 🧰 Prérequis
 
-Depuis votre hôte Proxmox :
+- Un serveur **Proxmox VE** fonctionnel
+- Le template `ubuntu-22.04-standard` disponible
+- Connexion internet sur le node Proxmox
+- Stockage `local-lvm` (ou autre)
+- Lancement du script **depuis le node Proxmox**
+
+---
+
+## 🧪 Lancer l'installation
+
+Depuis le **node Proxmox**, exécutez :
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<ton-username>/<ton-repo>/main/deploy.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/loic564492/forgejo_LXD-/main/deploy.sh)

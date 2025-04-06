@@ -2,53 +2,78 @@
 
 set -e
 
-echo -e "\n=== Création d'un conteneur LXC avec Forgejo (Ubuntu 22.04 + Docker) ===\n"
+# Vérifie si whiptail est dispo
+USE_WHIPTAIL=false
+if command -v whiptail >/dev/null 2>&1; then
+  USE_WHIPTAIL=true
+fi
 
-# Choix des paramètres utilisateur
-read -p "ID du conteneur (ex: 900) : " CTID
-read -p "Nom d'hôte (ex: forgejo) : " HOSTNAME
-read -p "Taille du disque (en Go, ex: 8) : " DISK
-read -p "RAM (en Mo, ex: 512) : " RAM
-read -p "Stockage (ex: local-lvm) : " STORAGE
-read -p "Adresse IP (laisser vide pour DHCP) : " IPADDR
+# Choix du mode via whiptail ou fallback
+if [ "$USE_WHIPTAIL" = true ]; then
+  CHOICE=$(whiptail --title "Forgejo LXC Installer" --menu "Choisissez un mode de déploiement :" 15 60 2 \
+    "1" "🟢 Mode Standard (tout auto, aucun prompt)" \
+    "2" "🔵 Mode Avancé (personnalisation complète)" 3>&1 1>&2 2>&3)
+else
+  echo -e "\n=== Sélection du mode de déploiement ==="
+  echo "1) Mode Standard (tout auto)"
+  echo "2) Mode Avancé (interactif)"
+  read -p "Votre choix [1/2] : " CHOICE
+fi
 
-# Template Ubuntu 22.04
+# Valeurs par défaut
+CTID=900
+HOSTNAME="forgejo"
+DISK=8
+RAM=512
+STORAGE="local-lvm"
+IPADDR=""
 TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
 TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
 
+# Mode avancé → on demande
+if [ "$CHOICE" = "2" ]; then
+  read -p "ID du conteneur [900] : " input && CTID="${input:-$CTID}"
+  read -p "Nom d'hôte [forgejo] : " input && HOSTNAME="${input:-$HOSTNAME}"
+  read -p "Taille du disque en Go [8] : " input && DISK="${input:-$DISK}"
+  read -p "RAM en Mo [512] : " input && RAM="${input:-$RAM}"
+  read -p "Stockage [local-lvm] : " input && STORAGE="${input:-$STORAGE}"
+  read -p "Adresse IP (laisser vide pour DHCP) : " IPADDR
+  [ -n "$IPADDR" ] && read -p "Passerelle (ex: 192.168.1.1) : " GATEWAY
+fi
+
 # Téléchargement du template si absent
 if [ ! -f "$TEMPLATE_PATH" ]; then
-  echo "Téléchargement du template Ubuntu 22.04..."
+  echo "📦 Téléchargement du template Ubuntu 22.04..."
   pveam update
   pveam download local $TEMPLATE
 fi
 
-# Construction de la ligne réseau
+# Construction réseau
 if [ -z "$IPADDR" ]; then
   NET="name=eth0,bridge=vmbr0,ip=dhcp"
 else
-  NET="name=eth0,bridge=vmbr0,ip=$IPADDR/24,gw=192.168.1.1"
+  NET="name=eth0,bridge=vmbr0,ip=$IPADDR/24,gw=$GATEWAY"
 fi
 
 # Création du conteneur
-echo "Création du CT $CTID..."
+echo "⚙️ Création du CT $CTID ($HOSTNAME)..."
 pct create $CTID local:vztmpl/$TEMPLATE -hostname $HOSTNAME \
   -memory $RAM -cores 2 -net0 $NET -ostype ubuntu \
   -rootfs $STORAGE:$DISK \
   -features nesting=1
 
-# Démarrage du CT
+# Démarrage
 pct start $CTID
 sleep 5
 
-# Installation des paquets nécessaires
-echo "Installation de Docker et des outils dans le CT..."
+echo "📦 Installation de Docker et des outils dans le conteneur..."
+
+# Base system + Docker
 pct exec $CTID -- bash -c "
   apt update &&
   apt install -y curl gnupg2 ca-certificates lsb-release software-properties-common jq git
 "
 
-# Ajout du dépôt Docker
 pct exec $CTID -- bash -c "
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg &&
   echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable' > /etc/apt/sources.list.d/docker.list &&
@@ -56,13 +81,13 @@ pct exec $CTID -- bash -c "
   apt install -y docker-ce docker-ce-cli containerd.io
 "
 
-# Installation de Docker Compose
+# Docker Compose
 pct exec $CTID -- bash -c "
-  curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/bin/docker-compose &&
+  curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose &&
   chmod +x /usr/local/bin/docker-compose
 "
 
-# Création de l’arborescence Forgejo + docker-compose.yml
+# Déploiement Forgejo
 pct exec $CTID -- bash -c "
   mkdir -p /opt/forgejo &&
   cat > /opt/forgejo/docker-compose.yml <<EOF
@@ -83,7 +108,12 @@ volumes:
 EOF
 "
 
-# Démarrage de Forgejo
+# Lancement Forgejo
 pct exec $CTID -- bash -c "cd /opt/forgejo && docker-compose up -d"
 
-echo -e "\nForgejo est installé et accessible sur le port 3000 de l'IP du conteneur."
+# IP dynamique
+CT_IP=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+
+echo -e "\n✅ Forgejo est installé avec succès !"
+echo -e "🌐 Accès Web : http://$CT_IP:3000"
+echo -e "🔑 Accès SSH Git : ssh://git@$CT_IP:2222\n"
