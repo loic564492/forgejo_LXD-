@@ -1,99 +1,90 @@
 #!/bin/bash
 
-# V6
+set -euo pipefail
 
-set -e
+# ===== Couleurs =====
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+BLUE=$(tput setaf 4)
+RESET=$(tput sgr0)
 
-# Vérifie si whiptail est dispo
-USE_WHIPTAIL=false
-if command -v whiptail >/dev/null 2>&1; then
-  USE_WHIPTAIL=true
-fi
+# ===== Fonctions =====
 
-# Choix du mode via menu
-if [ "$USE_WHIPTAIL" = true ]; then
-  CHOICE=$(whiptail --title "Forgejo LXC Installer" --menu "Choisissez un mode de déploiement :" 15 60 2 \
-    "1" "🟢 Mode Standard (tout auto, aucun prompt)" \
-    "2" "🔵 Mode Avancé (personnalisation complète)" 3>&1 1>&2 2>&3)
-else
-  echo -e "\n=== Sélection du mode de déploiement ==="
-  echo "1) Mode Standard (tout auto)"
-  echo "2) Mode Avancé (interactif)"
-  read -p "Votre choix [1/2] : " CHOICE
-fi
+log() {
+  echo -e "${BLUE}==>${RESET} $1"
+}
 
-# Valeurs par défaut
-CTID=900
-HOSTNAME="forgejo"
-DISK=8
-RAM=512
-STORAGE="local-lvm"
-IPADDR=""
-TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
-TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
+success() {
+  echo -e "${GREEN}✔${RESET} $1"
+}
 
-# Mode avancé
-if [ "$CHOICE" = "2" ]; then
-  read -p "ID du conteneur [900] : " input && CTID="${input:-$CTID}"
-  read -p "Nom d'hôte [forgejo] : " input && HOSTNAME="${input:-$HOSTNAME}"
-  read -p "Taille du disque en Go [8] : " input && DISK="${input:-$DISK}"
-  read -p "RAM en Mo [512] : " input && RAM="${input:-$RAM}"
-  read -p "Stockage [local-lvm] : " input && STORAGE="${input:-$STORAGE}"
-  read -p "Adresse IP (laisser vide pour DHCP) : " IPADDR
-  [ -n "$IPADDR" ] && read -p "Passerelle (ex: 192.168.1.1) : " GATEWAY
-fi
+error() {
+  echo -e "${RED}✖${RESET} $1"
+  exit 1
+}
 
-# Téléchargement template si manquant
-if [ ! -f "$TEMPLATE_PATH" ]; then
-  echo "📦 Téléchargement du template Ubuntu 22.04..."
-  pveam update
-  pveam download local $TEMPLATE
-fi
+require_whiptail() {
+  command -v whiptail >/dev/null 2>&1 || apt install -y whiptail
+}
 
-# Configuration réseau
-if [ -z "$IPADDR" ]; then
-  NET="name=eth0,bridge=vmbr0,ip=dhcp"
-else
-  NET="name=eth0,bridge=vmbr0,ip=$IPADDR/24,gw=$GATEWAY"
-fi
+show_menu() {
+  require_whiptail
+  whiptail --title "Forgejo LXC Installer (Docker Edition)" \
+    --menu "Choisissez un mode de déploiement :" 15 60 2 \
+    "1" "🟢 Mode Standard (valeurs par défaut, zéro question)" \
+    "2" "🔵 Mode Avancé (personnalisation complète)" 3>&1 1>&2 2>&3
+}
 
-# Création CT
-echo "⚙️ Création du CT $CTID ($HOSTNAME)..."
-pct create $CTID local:vztmpl/$TEMPLATE -hostname $HOSTNAME \
-  -memory $RAM -cores 2 -net0 $NET -ostype ubuntu \
-  -rootfs $STORAGE:$DISK \
-  -features nesting=1
+create_ct() {
+  log "Création du conteneur LXC..."
 
-# Démarrage
-pct start $CTID
-sleep 5
+  local NET_CONFIG
 
-echo "📦 Installation de Docker et des outils dans le conteneur..."
+  if [ -z "$IPADDR" ]; then
+    NET_CONFIG="name=eth0,bridge=vmbr0,ip=dhcp"
+  else
+    NET_CONFIG="name=eth0,bridge=vmbr0,ip=${IPADDR}/24,gw=${GATEWAY}"
+  fi
 
-# Base system + Docker
-pct exec $CTID -- bash -c "
-  apt update &&
-  apt install -y curl gnupg2 ca-certificates lsb-release software-properties-common jq git
-"
+  pct create "$CTID" local:vztmpl/$TEMPLATE -hostname "$HOSTNAME" \
+    -memory "$RAM" -cores 2 -net0 "$NET_CONFIG" -ostype ubuntu \
+    -rootfs "$STORAGE:$DISK" \
+    -features nesting=1 || error "Échec de création du CT"
 
-# Dépôt Docker – corrigé avec échappement 💥
-pct exec $CTID -- bash -c "
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg &&
-  echo \"deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \\\$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list &&
-  apt update &&
-  apt install -y docker-ce docker-ce-cli containerd.io
-"
+  pct start "$CTID"
+  sleep 5
+  success "Conteneur $CTID démarré"
+}
 
-# Docker Compose
-pct exec $CTID -- bash -c "
-  curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose &&
-  chmod +x /usr/local/bin/docker-compose
-"
+install_docker_stack() {
+  log "Installation de Docker et Docker Compose dans le conteneur..."
 
-# Déploiement Forgejo
-pct exec $CTID -- bash -c "
-  mkdir -p /opt/forgejo &&
-  cat > /opt/forgejo/docker-compose.yml <<EOF
+  pct exec $CTID -- bash -c "
+    apt update &&
+    apt install -y curl gnupg2 ca-certificates lsb-release software-properties-common jq git
+  "
+
+  pct exec $CTID -- bash -c "
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg &&
+    echo \"deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \\\$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list &&
+    apt update &&
+    apt install -y docker-ce docker-ce-cli containerd.io
+  "
+
+  pct exec $CTID -- bash -c "
+    curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose &&
+    chmod +x /usr/local/bin/docker-compose
+  "
+
+  success "Docker et Docker Compose installés dans le conteneur"
+}
+
+deploy_forgejo() {
+  log "Déploiement de Forgejo via Docker..."
+
+  pct exec $CTID -- bash -c "
+    mkdir -p /opt/forgejo &&
+    cat > /opt/forgejo/docker-compose.yml <<EOF
 version: '3.8'
 services:
   forgejo:
@@ -109,14 +100,58 @@ services:
 volumes:
   forgejo-data:
 EOF
-"
+    cd /opt/forgejo && docker-compose up -d
+  "
 
-# Lancement Forgejo
-pct exec $CTID -- bash -c "cd /opt/forgejo && docker-compose up -d"
+  success "Forgejo déployé et lancé"
+}
 
-# IP dynamique
-CT_IP=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+show_summary() {
+  CT_IP=$(pct exec $CTID -- hostname -I | awk '{print $1}')
+  echo -e "\n${GREEN}✔ Installation terminée !${RESET}"
+  echo -e "🌍 Accès Web : ${BLUE}http://$CT_IP:3000${RESET}"
+  echo -e "🔐 SSH Git : ${BLUE}ssh://git@$CT_IP:2222${RESET}\n"
+}
 
-echo -e "\n✅ Forgejo est installé avec succès !"
-echo -e "🌐 Accès Web : http://$CT_IP:3000"
-echo -e "🔑 Accès SSH Git : ssh://git@$CT_IP:2222\n"
+# ===== Début script principal =====
+
+TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
+
+# Téléchargement si besoin
+if [ ! -f "$TEMPLATE_PATH" ]; then
+  log "Téléchargement du template Ubuntu 22.04..."
+  pveam update
+  pveam download local $TEMPLATE || error "Échec du téléchargement du template"
+fi
+
+# Valeurs par défaut
+CTID=900
+HOSTNAME="forgejo"
+DISK=8
+RAM=1024
+STORAGE="local-lvm"
+IPADDR=""
+GATEWAY="192.168.1.1"
+
+MODE=$(show_menu)
+
+if [ "$MODE" = "2" ]; then
+  read -p "ID du conteneur [900] : " input && CTID="${input:-$CTID}"
+  read -p "Nom d'hôte [forgejo] : " input && HOSTNAME="${input:-$HOSTNAME}"
+  read -p "Taille du disque (Go) [8] : " input && DISK="${input:-$DISK}"
+  read -p "RAM (Mo) [1024] : " input && RAM="${input:-$RAM}"
+  read -p "Stockage [local-lvm] : " input && STORAGE="${input:-$STORAGE}"
+  read -p "Adresse IP (laisser vide pour DHCP) : " IPADDR
+  if [ -n "$IPADDR" ]; then
+    read -p "Passerelle [192.168.1.1] : " input && GATEWAY="${input:-$GATEWAY}"
+  fi
+else
+  log "Mode Standard sélectionné, tout se fait en automatique..."
+fi
+
+# Exécution
+create_ct
+install_docker_stack
+deploy_forgejo
+show_summary
