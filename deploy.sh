@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# V6
+
 set -e
 
 # Vérifie si whiptail est dispo
@@ -8,7 +10,7 @@ if command -v whiptail >/dev/null 2>&1; then
   USE_WHIPTAIL=true
 fi
 
-# Choix du mode via whiptail ou fallback
+# Choix du mode via menu
 if [ "$USE_WHIPTAIL" = true ]; then
   CHOICE=$(whiptail --title "Forgejo LXC Installer" --menu "Choisissez un mode de déploiement :" 15 60 2 \
     "1" "🟢 Mode Standard (tout auto, aucun prompt)" \
@@ -30,7 +32,7 @@ IPADDR=""
 TEMPLATE="ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
 TEMPLATE_PATH="/var/lib/vz/template/cache/$TEMPLATE"
 
-# Mode avancé → on demande
+# Mode avancé
 if [ "$CHOICE" = "2" ]; then
   read -p "ID du conteneur [900] : " input && CTID="${input:-$CTID}"
   read -p "Nom d'hôte [forgejo] : " input && HOSTNAME="${input:-$HOSTNAME}"
@@ -41,21 +43,21 @@ if [ "$CHOICE" = "2" ]; then
   [ -n "$IPADDR" ] && read -p "Passerelle (ex: 192.168.1.1) : " GATEWAY
 fi
 
-# Téléchargement du template si absent
+# Téléchargement template si manquant
 if [ ! -f "$TEMPLATE_PATH" ]; then
   echo "📦 Téléchargement du template Ubuntu 22.04..."
   pveam update
   pveam download local $TEMPLATE
 fi
 
-# Construction réseau
+# Configuration réseau
 if [ -z "$IPADDR" ]; then
   NET="name=eth0,bridge=vmbr0,ip=dhcp"
 else
   NET="name=eth0,bridge=vmbr0,ip=$IPADDR/24,gw=$GATEWAY"
 fi
 
-# Création du conteneur
+# Création CT
 echo "⚙️ Création du CT $CTID ($HOSTNAME)..."
 pct create $CTID local:vztmpl/$TEMPLATE -hostname $HOSTNAME \
   -memory $RAM -cores 2 -net0 $NET -ostype ubuntu \
@@ -74,9 +76,10 @@ pct exec $CTID -- bash -c "
   apt install -y curl gnupg2 ca-certificates lsb-release software-properties-common jq git
 "
 
+# Dépôt Docker – corrigé avec échappement 💥
 pct exec $CTID -- bash -c "
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg &&
-  echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable' > /etc/apt/sources.list.d/docker.list &&
+  echo \"deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \\\$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list &&
   apt update &&
   apt install -y docker-ce docker-ce-cli containerd.io
 "
